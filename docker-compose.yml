@@ -1,0 +1,14 @@
+version: "3.1"
+services:
+  db:
+    image: postgres
+    restart: always
+    container_name: test_tool_postgres
+    environment:
+      POSTGRES_PASSWORD: example
+    ports:
+      - 54320:5432
+    volumes:
+      - testtooldata:/var/lib/postgresql/data
+volumes:
+  testtooldata:
