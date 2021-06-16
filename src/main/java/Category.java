@@ -1,8 +1,12 @@
+import com.fasterxml.jackson.annotation.JsonManagedReference;
+
 import java.util.ArrayList;
 import java.util.List;
 
 public class Category {
     private String title;
+
+    @JsonManagedReference
     private List<Recipe> recipeList;
 
     Category(String title){

@@ -1,8 +1,12 @@
+import com.fasterxml.jackson.annotation.JsonBackReference;
+
 import java.util.ArrayList;
 import java.util.List;
 
 public class Recipe {
     private String title;
+
+    @JsonBackReference
     private List<Category> categoryList;
 
     Recipe(String title){

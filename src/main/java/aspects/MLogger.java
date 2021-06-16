@@ -1,7 +1,11 @@
 package aspects;
 
 import aspects.InvocationData;
-import com.google.gson.Gson;
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.PropertyAccessor;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonMappingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.aspectj.lang.JoinPoint;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -21,8 +25,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 @Aspect
 public class MLogger {
-    private final int METHODS_CACHE_SIZE = 100;
-    private final int CONSTRUCTORS_CACHE_SIZE = 10;
+    private final int METHODS_CACHE_SIZE = 1;
+    private final int CONSTRUCTORS_CACHE_SIZE = 1;
 
     private static final String SQL_DROP = "DROP TABLE IF EXISTS INVOCATION_DATA";
 
@@ -32,9 +36,9 @@ public class MLogger {
             + " CLASS_NAME varchar(100) NOT NULL,"
             + " METHOD_NAME varchar(100) NOT NULL,"
             + " INPUT_ARGUMENT_TYPES text[] NOT NULL,"
-            + " INPUT_ARGUMENTS bytea NOT NULL,"
+            + " INPUT_ARGUMENTS text NOT NULL,"
             + " RETURN_TYPE varchar(100) NOT NULL,"
-            + " RETURN_VALUE bytea NOT NULL,"
+            + " RETURN_VALUE text NOT NULL,"
             + " INVOCATION_TIMESTAMP bigint NOT NULL,"
             + " INVOCATION_TIME bigint NOT NULL,"
             + " ORDER_ID bigint NOT NULL,"
@@ -97,11 +101,15 @@ public class MLogger {
         } catch (Exception ex) {
             ex.printStackTrace();
         }
+        objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY);
+
     }
 
     List<InvocationData> methodInvocationRecords = new LinkedList<InvocationData>();
     List<InvocationData> constructorInvocationRecords = new LinkedList<InvocationData>();
-    private Gson gson = new Gson();
+//    private Gson gson = new Gson();
+    ObjectMapper objectMapper = new ObjectMapper();
+
 
     AtomicInteger atomicCounter = new AtomicInteger(0);
 
@@ -145,96 +153,24 @@ public class MLogger {
     }
 
 
-    private void writeInvocationRecords(InvocationData invocationData, boolean isConstructor) {
+    private void writeInvocationRecords(InvocationData invocationData, boolean isConstructor) throws JsonProcessingException {
         final List<InvocationData> invocationRecords = isConstructor ? constructorInvocationRecords : methodInvocationRecords;
         final String recordsFileName = isConstructor ? "constructor_invocation_records.json" : "method_invocation_records.json";
 
-        byte[] inputArgsBytes = null;
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        ObjectOutputStream out = null;
-        try {
-            if (invocationData.inputArgs != null) {
-                out = new ObjectOutputStream(bos);
-                out.writeObject(invocationData.inputArgs);
-                out.flush();
-                inputArgsBytes = bos.toByteArray();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        } finally {
-            try {
-                bos.close();
-            } catch (IOException ex) {
-                // ignore close exception
-            }
-        }
-
-        byte[] returnValueBytes = null;
-        ByteArrayOutputStream rvBos = new ByteArrayOutputStream();
-        ObjectOutputStream rvOut = null;
-        try {
-            if (invocationData.returnValue == null) {
-                returnValueBytes = null;
-            } else {
-                rvOut = new ObjectOutputStream(rvBos);
-                rvOut.writeObject(invocationData.returnValue);
-                rvOut.flush();
-                returnValueBytes = rvBos.toByteArray();
-            }
-
-        } catch (IOException e) {
-            e.printStackTrace();
-        } finally {
-            try {
-                rvBos.close();
-            } catch (IOException ex) {
-                // ignore close exception
-            }
-        }
-
-//        if (inputArgsBytes == null) {
-//            System.out.println("Bytes are null");
-//            return;
-//        }
-//        ByteArrayInputStream bis = new ByteArrayInputStream(yourBytes);
-//        ObjectInput in = null;
-//        try {
-//            in = new ObjectInputStream(bis);
-//            Object o = in.readObject();
-//            for (int i = 0; i < invocationData.inputArgs.length; i++) {
-//                if ((invocationData.inputArgs[i]).equals((((Object[]) o)[i]))) {
-//                    System.out.println("Objects are equal!");
-//                }
-//            }
-//         } catch (IOException e) {
-//            e.printStackTrace();
-//        } catch (ClassNotFoundException e) {
-//            e.printStackTrace();
-//        } finally {
-//            try {
-//                if (in != null) {
-//                    in.close();
-//                }
-//            } catch (IOException ex) {
-//                // ignore close exception
-//            }
-//        }
-
+        System.out.println(objectMapper.writeValueAsString(invocationData.inputArgs));
         invocationRecords.add(invocationData);
         if (invocationRecords.size() >= (isConstructor ? CONSTRUCTORS_CACHE_SIZE : METHODS_CACHE_SIZE)) {
             List<InvocationData> tempRecords = new ArrayList<InvocationData>(invocationRecords);
             invocationRecords.clear();
             try {
                 for (InvocationData record : tempRecords) {
-                    SerialBlob blob = new javax.sql.rowset.serial.SerialBlob(inputArgsBytes);
-                    SerialBlob rvBlob = new javax.sql.rowset.serial.SerialBlob(returnValueBytes);
 //                    blob.blob;
                     psInsert.setString(1, record.className);
                     psInsert.setString(2, record.methodName);
                     psInsert.setArray(3, conn.createArrayOf("text", record.inputArgsTypes));
-                    psInsert.setBinaryStream(4, blob.getBinaryStream());
                     psInsert.setString(5, record.returnValueType);
-                    psInsert.setBinaryStream(6, rvBlob.getBinaryStream());
+                    psInsert.setString(4, record.inputArgs.length == 0 ? "" : objectMapper.writeValueAsString(record.inputArgs));
+                    psInsert.setString(6, objectMapper.writeValueAsString(record.returnValue));
                     psInsert.setLong(7, record.invocationTimeStamp);
                     psInsert.setLong(8, record.invocationTime);
                     psInsert.setLong(9, record.orderId);
@@ -265,7 +201,7 @@ public class MLogger {
     }
 
     @Before("execution(*.new(..)) && !within(MLogger)")
-    public void aroundSecond(JoinPoint point) {
+    public void aroundSecond(JoinPoint point) throws JsonProcessingException{
         final String className = ConstructorSignature.class.cast(point.getSignature()).getConstructor().getName();
 
         if (classes.contains("all") || classes.contains(className)) {

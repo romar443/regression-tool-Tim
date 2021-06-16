@@ -4,13 +4,16 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.MappingJsonFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.gson.Gson;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
 
 import java.io.*;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -18,11 +21,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class RegressionTest1 {
 
-    private final Gson gson = new Gson();
-    private final String CONSTRUCTORS_FILE_NAME = "constructor_invocation_records.json";
-    private final String METHODS_FILE_NAME = "method_invocation_records.json";
+    ObjectMapper objectMapper = new ObjectMapper();
     String classForTest;
     boolean executePrivateMethods;
+    Connection conn;
+
+    private static final String SQL_SELECT = "SELECT * FROM INVOCATION_DATA ORDER BY ORDER_ID";
 
     public RegressionTest1() {
         try (InputStream input = new FileInputStream("config.properties")) {
@@ -30,7 +34,19 @@ public class RegressionTest1 {
             prop.load(input);
             executePrivateMethods = Boolean.parseBoolean(prop.getProperty("executePrivateMethods", "false"));
             classForTest = prop.getProperty("classForTest");
-        } catch (IOException ex) {
+            // psql --username=postgres --password=my_password
+            String url = "jdbc:postgresql://localhost:54320/";
+            Properties props = new Properties();
+            props.setProperty("user","postgres");
+            props.setProperty("password","my_password");
+            conn = DriverManager.getConnection(url, props);
+            if (conn != null) {
+                System.out.println("Connected to the database!");
+                conn.setAutoCommit(false);
+            } else {
+                System.out.println("Failed to make connection!");
+            }
+        } catch (Exception ex) {
             ex.printStackTrace();
         }
     }
@@ -38,18 +54,45 @@ public class RegressionTest1 {
     @TestFactory
     public Collection<DynamicTest> secondTest() throws Exception {
         System.out.println("Starting secondTest");
-        normalizeJsonFileIfNeeded(CONSTRUCTORS_FILE_NAME);
-        normalizeJsonFileIfNeeded(METHODS_FILE_NAME);
 
-        JsonFactory f = new MappingJsonFactory();
-        JsonParser constructorsJP = f.createParser(new File(CONSTRUCTORS_FILE_NAME));
-        JsonParser methodsJP = f.createParser(new File(METHODS_FILE_NAME));
+        List<InvocationData> constructorsData = new LinkedList<InvocationData>();
+        List<InvocationData> methodsData = new LinkedList<InvocationData>();
 
-        ObjectMapper mapper = new ObjectMapper();
-        List<InvocationData> constructorsData = mapper.readValue(constructorsJP, new TypeReference<List<InvocationData>>() {
-        });
-        List<InvocationData> methodsData = mapper.readValue(methodsJP, new TypeReference<List<InvocationData>>() {
-        });
+        Statement st = conn.createStatement();
+        ResultSet rs = st.executeQuery(SQL_SELECT);
+        while (rs.next()) {
+            Object[] inputArgs;
+            if (rs.getString(5).isEmpty()) {
+                inputArgs = new Object[0];
+            } else {
+                Class<?>[] argTypes = getArgTypes((String[])rs.getArray(4).getArray());
+                inputArgs = objectMapper.readValue(rs.getString(5), Object[].class);
+//                objectMapper.readTree(rs.getString(5)).
+//                inputArgs = objectMapper.readTree(rs.getString(5)).iterator().forEachRemaining((jsonNode -> objectMapper.treeToValue(jsonNode, argTypes)));
+            }
+            InvocationData invocationData = new InvocationData(
+                    rs.getString(2),
+                    rs.getString(3),
+                    (String[])rs.getArray(4).getArray(),
+                    inputArgs,
+                    rs.getString(6),
+                    objectMapper.readValue(rs.getString(7), Object.class),
+                    rs.getLong(8),
+                    rs.getLong(9),
+                    rs.getLong(10),
+                    rs.getLong(11),
+                    rs.getString(12),
+                    rs.getInt(13)
+                    );
+            if (rs.getBoolean(14)) {
+                constructorsData.add(invocationData);
+            } else {
+                methodsData.add(invocationData);
+            }
+        }
+        st.close();
+        rs.close();
+        conn.close();
 
         Class<?> classUnderTesting = Class.forName(classForTest);
 
@@ -103,31 +146,8 @@ public class RegressionTest1 {
     }
 
     private DynamicTest testMethod(InvocationData invocationData, Object objectUnderTesting) {
-        Class<?>[] argTypes;
-        argTypes = Arrays.stream(invocationData.inputArgsTypes).map((String e) -> {
-            try {
-                if (e.equals("boolean")) {
-                    return boolean.class;
-                }
 
-                if (e.equals("int")) {
-                    return int.class;
-                }
-
-                if (e.equals("double")) {
-                    return double.class;
-                }
-
-                if (e.equals("long")) {
-                    return long.class;
-                }
-
-                return Class.forName(e);
-            } catch (Exception classNotFoundException) {
-                classNotFoundException.printStackTrace();
-                return Object.class;
-            }
-        }).collect(Collectors.toList()).toArray(new Class[0]);
+        Class<?>[] argTypes = getArgTypes(invocationData.inputArgsTypes);
 
         Method method;
 
@@ -151,10 +171,17 @@ public class RegressionTest1 {
 
         try {
             method.setAccessible(true);
-            Object result = method.invoke(objectUnderTesting, invocationData.inputArgs);
-            System.out.println("compare: " + gson.toJson(result) + " with " + gson.toJson(invocationData.returnValue));
+            Object[] castedInputArgs = new Object[invocationData.inputArgs.length];
+
+            // Here we have an array of read objects inside invocationData.inputArgs and we need to cast it do actual data types somehow
+            for(int i = 0; i < invocationData.inputArgs.length; i++) {
+//                castedInputArgs[i] = argTypes[i].cast(invocationData.inputArgs[i]);
+                castedInputArgs[i] = objectMapper.readValue(objectMapper.writeValueAsString(invocationData.inputArgs[i]), argTypes[i]);
+            }
+
+            Object result = method.invoke(objectUnderTesting, castedInputArgs);
             return DynamicTest.dynamicTest(String.valueOf(invocationData.orderId),
-                    () -> assertEquals(gson.toJson(result), gson.toJson(invocationData.returnValue)));
+                    () -> assertEquals(objectMapper.writeValueAsString(result), objectMapper.writeValueAsString(invocationData.returnValue)));
         } catch (Exception e) {
             System.out.println(invocationData.orderId);
             e.printStackTrace();
@@ -163,39 +190,54 @@ public class RegressionTest1 {
 
     }
 
-    private void normalizeJsonFileIfNeeded(String fileName) throws Exception {
-        FileInputStream fstream = new FileInputStream(fileName);
-        BufferedReader br = new BufferedReader(new InputStreamReader(fstream));
+    Class<?> getType(String e) {
+        try {
+            if (e.equals("boolean")) {
+                return boolean.class;
+            }
 
-        String temp = br.readLine();
-        if (temp.isEmpty() || temp.startsWith("[")) {
-            System.out.println(fileName + " JSON file already normalized");
-            return;
+            if (e.equals("int")) {
+                return int.class;
+            }
+
+            if (e.equals("double")) {
+                return double.class;
+            }
+            if (e.equals("long")) {
+                return long.class;
+            }
+
+            return Class.forName(e);
+        } catch (Exception classNotFoundException) {
+            classNotFoundException.printStackTrace();
+            return Object.class;
         }
-        BufferedWriter bw = new BufferedWriter(new FileWriter(new File(fileName + "-normalized.json"), true));
+    }
 
-        String lastValue = temp;
+    private Class<?>[] getArgTypes(String[] inputArgsTypes) {
+        return Arrays.stream(inputArgsTypes).map((String e) -> {
+            try {
+                if (e.equals("boolean")) {
+                    return boolean.class;
+                }
 
-        if (temp != null) {
-            lastValue = "[" + temp;
-        }
+                if (e.equals("int")) {
+                    return int.class;
+                }
 
-        while ((temp = br.readLine()) != null) {
-            bw.write(lastValue);
-            bw.newLine();
-            lastValue = temp;
-        }
+                if (e.equals("double")) {
+                    return double.class;
+                }
 
-        if (lastValue != null && lastValue.endsWith(",")) {
-            lastValue = lastValue.substring(0, lastValue.length() - 1);
-            lastValue += "]";
-            bw.write(lastValue);
-        }
-        br.close();
-        bw.close();
-        File oldFile = new File(fileName);
-        oldFile.delete();
-        File newFile = new File(fileName + "-normalized.json");
-        newFile.renameTo(oldFile);
+                if (e.equals("long")) {
+                    return long.class;
+                }
+
+                return Class.forName(e);
+            } catch (Exception classNotFoundException) {
+                classNotFoundException.printStackTrace();
+                return Object.class;
+            }
+        }).collect(Collectors.toList()).toArray(new Class[0]);
     }
 }
