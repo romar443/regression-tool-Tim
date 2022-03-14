@@ -96,7 +96,7 @@
                     <complianceLevel>${maven.compiler.target}</complianceLevel>
                     <encoding>${project.build.sourceEncoding}</encoding>
                 </configuration>
-                <version>1.11</version>
+                <version>1.14.0</version>
                 <executions>
                     <execution>
                         <goals>
